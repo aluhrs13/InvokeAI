@@ -1,4 +1,5 @@
 # Step-by-step migrating GroundingDINO from https://github.com/IDEA-Research/GroundingDINO/blob/main/demo/inference_on_a_image.py
+# Reqs:pip install nw-groundingdino
 # Step 1 - Basic Files.
 from typing import Literal
 from pydantic import Field
@@ -34,11 +35,11 @@ class GroundingDinoInvocation(BaseInvocation):
     output_dir: str = Field(default="E:\\StableDiffusion", description="Path to output image to")
     box_threshold: float = Field(default=0.3, description="Box threshold")
     text_threshold: float = Field(default=0.25, description="Text threshold")
-    cpu_only: bool = Field(default=False, description="Run on CPU only")
+    cpu_only: bool = Field(default=True, description="Run on CPU only")
     #fmt: on
 
     # Step 2 - Take all the helper functions straight from the demo.
-    def plot_boxes_to_image(image_pil, tgt):
+    def plot_boxes_to_image(self, image_pil, tgt):
         H, W = tgt["size"]
         boxes = tgt["boxes"]
         labels = tgt["labels"]
@@ -79,7 +80,7 @@ class GroundingDinoInvocation(BaseInvocation):
 
         return image_pil, mask
 
-    def load_image(image_path):
+    def load_image(self, image_path):
         # load image
         image_pil = Image.open(image_path).convert("RGB")  # load image
 
@@ -93,7 +94,7 @@ class GroundingDinoInvocation(BaseInvocation):
         image, _ = transform(image_pil, None)  # 3, h, w
         return image_pil, image
 
-    def load_model(model_config_path, model_checkpoint_path, cpu_only=False):
+    def load_model(self, model_config_path, model_checkpoint_path, cpu_only=False):
         args = SLConfig.fromfile(model_config_path)
         args.device = "cuda" if not cpu_only else "cpu"
         model = build_model(args)
@@ -104,7 +105,7 @@ class GroundingDinoInvocation(BaseInvocation):
         _ = model.eval()
         return model
 
-    def get_grounding_output(model, image, caption, box_threshold, text_threshold, with_logits=True, cpu_only=False):
+    def get_grounding_output(self, model, image, caption, box_threshold, text_threshold, with_logits=True, cpu_only=False):
         caption = caption.lower()
         caption = caption.strip()
         if not caption.endswith("."):
@@ -142,36 +143,33 @@ class GroundingDinoInvocation(BaseInvocation):
 
         return boxes_filt, pred_phrases
 
+    # Step 4 - copy everything else from __main__ into here. Fix a lot of "self." references.
     def invoke(self, context: InvocationContext) -> PromptOutput:
+        # make dir
+        os.makedirs(self.output_dir, exist_ok=True)
+        # load image
+        image_pil, image = self.load_image(self.image_path)
+        # load model
+        model = self.load_model(self.config_file, self.checkpoint_path,
+                                cpu_only=self.cpu_only)
+
+        # visualize raw image
+        image_pil.save(os.path.join(self.output_dir, "raw_image.jpg"))
+
+        # run model
+        boxes_filt, pred_phrases = self.get_grounding_output(
+            model, image, self.text_prompt, self.box_threshold, self.text_threshold, cpu_only=self.cpu_only
+        )
+
+        # visualize pred
+        size = image_pil.size
+        pred_dict = {
+            "boxes": boxes_filt,
+            "size": [size[1], size[0]],  # H,W
+            "labels": pred_phrases,
+        }
+        # import ipdb; ipdb.set_trace()
+        image_with_box = self.plot_boxes_to_image(image_pil, pred_dict)[0]
+        image_with_box.save(os.path.join(self.output_dir, "pred.jpg"))
+
         return PromptOutput(prompt=self.text_prompt)
-
-
-# Step 2 - Take the __main__ function straight from the demo and put it in a big commented block. We'll pull it into invoke piece by piece.
-'''
-if __name__ == "__main__":
-    # make dir
-    os.makedirs(output_dir, exist_ok=True)
-    # load image
-    image_pil, image = load_image(image_path)
-    # load model
-    model = load_model(config_file, checkpoint_path, cpu_only=args.cpu_only)
-
-    # visualize raw image
-    image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
-
-    # run model
-    boxes_filt, pred_phrases = get_grounding_output(
-        model, image, text_prompt, box_threshold, text_threshold, cpu_only=args.cpu_only
-    )
-
-    # visualize pred
-    size = image_pil.size
-    pred_dict = {
-        "boxes": boxes_filt,
-        "size": [size[1], size[0]],  # H,W
-        "labels": pred_phrases,
-    }
-    # import ipdb; ipdb.set_trace()
-    image_with_box = plot_boxes_to_image(image_pil, pred_dict)[0]
-    image_with_box.save(os.path.join(output_dir, "pred.jpg"))
-'''
