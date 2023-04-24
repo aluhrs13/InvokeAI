@@ -25,7 +25,16 @@ class GroundingDinoInvocation(BaseInvocation):
     """GroundingDINO - https://github.com/IDEA-Research/GroundingDINO"""
     #fmt: off
     type: Literal["grounding_dino"] = "grounding_dino"
-    prompt: str = Field(default=None, description="The input prompt")
+
+    # Step 3 - The demo takes in a bunch of parameters, we'll take them in as inputs to our node. Future steps will adjust these to make more sense.
+    config_file: str = Field(default="E:\\StableDiffusion\\GroundingDINO\\GroundingDINO_SwinT_OGC.py", description="Path to the model config file")
+    checkpoint_path: str = Field(default="E:\\StableDiffusion\\GroundingDINO\\groundingdino_swint_ogc.pth", description="Path to the GroundingDINO checkpoint file.")
+    image_path: str = Field(default="E:\\StableDiffusion\\cats.png", description="Path to the image to run inference on.")
+    text_prompt: str = Field(default="The black cat.", description="The input prompt")
+    output_dir: str = Field(default="E:\\StableDiffusion", description="Path to output image to")
+    box_threshold: float = Field(default=0.3, description="Box threshold")
+    text_threshold: float = Field(default=0.25, description="Text threshold")
+    cpu_only: bool = Field(default=False, description="Run on CPU only")
     #fmt: on
 
     # Step 2 - Take all the helper functions straight from the demo.
@@ -134,33 +143,12 @@ class GroundingDinoInvocation(BaseInvocation):
         return boxes_filt, pred_phrases
 
     def invoke(self, context: InvocationContext) -> PromptOutput:
-        return PromptOutput(prompt=self.prompt)
+        return PromptOutput(prompt=self.text_prompt)
 
 
 # Step 2 - Take the __main__ function straight from the demo and put it in a big commented block. We'll pull it into invoke piece by piece.
 '''
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser("Grounding DINO example", add_help=True)
-    parser.add_argument("--config_file", "-c", type=str, required=True, help="path to config file")
-    parser.add_argument(
-        "--checkpoint_path", "-p", type=str, required=True, help="path to checkpoint file"
-    )
-    parser.add_argument("--image_path", "-i", type=str, required=True, help="path to image file")
-    parser.add_argument("--text_prompt", "-t", type=str, required=True, help="text prompt")
-    parser.add_argument(
-        "--output_dir", "-o", type=str, default="outputs", required=True, help="output directory"
-    )
-
-    parser.add_argument("--box_threshold", type=float, default=0.3, help="box threshold")
-    parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
-
-    parser.add_argument("--cpu-only", action="store_true", help="running on cpu only!, default=False")
-    args = parser.parse_args()
-
-    # cfg
-
-
     # make dir
     os.makedirs(output_dir, exist_ok=True)
     # load image
