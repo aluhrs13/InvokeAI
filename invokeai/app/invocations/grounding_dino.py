@@ -4,7 +4,7 @@
 from typing import Literal
 from pydantic import Field
 from .baseinvocation import BaseInvocation, InvocationContext
-from .prompt import PromptOutput
+from .image import ImageField, MaskOutput, ImageType
 
 # Step 2 - Take libraries straight from the demo. We don't need all of them, and we'll clean them up later.
 import argparse
@@ -36,6 +36,7 @@ class GroundingDinoInvocation(BaseInvocation):
     box_threshold: float = Field(default=0.3, description="Box threshold")
     text_threshold: float = Field(default=0.25, description="Text threshold")
     cpu_only: bool = Field(default=True, description="Run on CPU only")
+    mask_count: int = Field(default=1, description="Number of masks to generate")
     #fmt: on
 
     # Step 2 - Take all the helper functions straight from the demo.
@@ -49,6 +50,8 @@ class GroundingDinoInvocation(BaseInvocation):
         draw = ImageDraw.Draw(image_pil)
         mask = Image.new("L", image_pil.size, 0)
         mask_draw = ImageDraw.Draw(mask)
+
+        drawn_count = 0
 
         # draw boxes and masks
         for box, label in zip(boxes, labels):
@@ -76,7 +79,9 @@ class GroundingDinoInvocation(BaseInvocation):
             draw.rectangle(bbox, fill=color)
             draw.text((x0, y0), str(label), fill="white")
 
-            mask_draw.rectangle([x0, y0, x1, y1], fill=255, width=6)
+            if (drawn_count < self.mask_count):
+                mask_draw.rectangle([x0, y0, x1, y1], fill=255, width=6)
+                drawn_count += 1
 
         return image_pil, mask
 
@@ -144,7 +149,8 @@ class GroundingDinoInvocation(BaseInvocation):
         return boxes_filt, pred_phrases
 
     # Step 4 - copy everything else from __main__ into here. Fix a lot of "self." references.
-    def invoke(self, context: InvocationContext) -> PromptOutput:
+    # Step 5 - Change to outputting a mask.
+    def invoke(self, context: InvocationContext) -> MaskOutput:
         # make dir
         os.makedirs(self.output_dir, exist_ok=True)
         # load image
@@ -169,7 +175,22 @@ class GroundingDinoInvocation(BaseInvocation):
             "labels": pred_phrases,
         }
         # import ipdb; ipdb.set_trace()
-        image_with_box = self.plot_boxes_to_image(image_pil, pred_dict)[0]
+        image_with_box, output_mask = self.plot_boxes_to_image(
+            image_pil, pred_dict)
         image_with_box.save(os.path.join(self.output_dir, "pred.jpg"))
 
-        return PromptOutput(prompt=self.text_prompt)
+        # Step 5 - Save the mask to the output directory for debugging, and pass it to services.
+        # Services stuff stolen from MaskFromAlphaInvocation in image.py
+        output_mask.save(os.path.join(self.output_dir, "mask.jpg"))
+        image_type = ImageType.INTERMEDIATE
+        image_name = context.services.images.create_name(
+            context.graph_execution_state_id, self.id
+        )
+
+        metadata = context.services.metadata.build_metadata(
+            session_id=context.graph_execution_state_id, node=self
+        )
+
+        context.services.images.save(
+            image_type, image_name, output_mask, metadata)
+        return MaskOutput(mask=ImageField(image_type=image_type, image_name=image_name))
