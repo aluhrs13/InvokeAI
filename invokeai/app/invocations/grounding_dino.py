@@ -4,7 +4,7 @@
 from typing import Literal, Union
 from pydantic import Field
 from .baseinvocation import BaseInvocation, InvocationContext
-from .image import ImageField, MaskOutput, ImageType
+from .image import ImageField, ImageOutput, ImageType
 
 # Step 2 - Take libraries straight from the demo. We don't need all of them, and we'll clean them up later.
 import argparse
@@ -90,7 +90,7 @@ class GroundingDinoInvocation(BaseInvocation):
             labels), "boxes and labels must have same length"
 
         draw = ImageDraw.Draw(image_pil)
-        mask = Image.new("L", image_pil.size, 255)
+        mask = Image.new("L", image_pil.size, 0)
         mask_draw = ImageDraw.Draw(mask)
 
         drawn_count = 0
@@ -122,7 +122,7 @@ class GroundingDinoInvocation(BaseInvocation):
             draw.text((x0, y0), str(label), fill="white")
 
             if (drawn_count < self.mask_count):
-                mask_draw.rectangle([x0, y0, x1, y1], fill=0, width=6)
+                mask_draw.rectangle([x0, y0, x1, y1], fill=255, width=6)
                 drawn_count += 1
 
         return image_pil, mask
@@ -179,7 +179,7 @@ class GroundingDinoInvocation(BaseInvocation):
     # Step 4 - copy everything else from __main__ into here. Fix a lot of "self." references.
     # Step 5 - Change to outputting a mask.
     # Step 6 - Change to inputting from a previous node.
-    def invoke(self, context: InvocationContext) -> MaskOutput:
+    def invoke(self, context: InvocationContext) -> ImageOutput:
         # make dir
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -239,4 +239,4 @@ class GroundingDinoInvocation(BaseInvocation):
 
         context.services.images.save(
             image_type, image_name, output_mask, metadata)
-        return MaskOutput(mask=ImageField(image_type=image_type, image_name=image_name))
+        return ImageOutput(image=ImageField(image_type=image_type, image_name=image_name))
