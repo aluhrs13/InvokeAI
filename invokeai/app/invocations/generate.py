@@ -81,7 +81,8 @@ class TextToImageInvocation(BaseInvocation, SDImageInvocation):
 
         outputs = Txt2Img(model).generate(
             prompt=self.prompt,
-            step_callback=partial(self.dispatch_progress, context, source_node_id),
+            step_callback=partial(self.dispatch_progress,
+                                  context, source_node_id),
             **self.dict(
                 exclude={"prompt"}
             ),  # Shorthand for passing all of the parameters above manually
@@ -102,13 +103,15 @@ class TextToImageInvocation(BaseInvocation, SDImageInvocation):
             session_id=context.graph_execution_state_id, node=self
         )
 
+        final_image = generate_output.image
+
         context.services.images.save(
-            image_type, image_name, generate_output.image, metadata
+            image_type, image_name, final_image, metadata
         )
         return build_image_output(
             image_type=image_type,
             image_name=image_name,
-            image=generate_output.image,
+            image=final_image,
         )
 
 
@@ -163,7 +166,8 @@ class ImageToImageInvocation(TextToImageInvocation):
             prompt=self.prompt,
             init_image=image,
             init_mask=mask,
-            step_callback=partial(self.dispatch_progress, context, source_node_id),
+            step_callback=partial(self.dispatch_progress,
+                                  context, source_node_id),
             **self.dict(
                 exclude={"prompt", "image", "mask"}
             ),  # Shorthand for passing all of the parameters above manually
@@ -187,7 +191,8 @@ class ImageToImageInvocation(TextToImageInvocation):
             session_id=context.graph_execution_state_id, node=self
         )
 
-        context.services.images.save(image_type, image_name, result_image, metadata)
+        context.services.images.save(
+            image_type, image_name, result_image, metadata)
         return build_image_output(
             image_type=image_type,
             image_name=image_name,
@@ -203,7 +208,7 @@ class InpaintInvocation(ImageToImageInvocation):
     # Inputs
     mask: Union[ImageField, None] = Field(description="The mask")
     inpaint_replace: float = Field(
-        default=0.0,
+        default=1.0,
         ge=0.0,
         le=1.0,
         description="The amount by which to replace masked areas with latent noise",
@@ -223,18 +228,11 @@ class InpaintInvocation(ImageToImageInvocation):
         )
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
-        image = (
-            None
-            if self.image is None
-            else context.services.images.get(
-                self.image.image_type, self.image.image_name
-            )
-        )
-        mask = (
-            None
-            if self.mask is None
-            else context.services.images.get(self.mask.image_type, self.mask.image_name)
-        )
+        image = context.services.images.get(
+            self.image.image_type, self.image.image_name)
+
+        mask = context.services.images.get(
+            self.mask.image_type, self.mask.image_name)
 
         # Handle invalid model parameter
         model = choose_model(context.services.model_manager, self.model)
@@ -245,11 +243,20 @@ class InpaintInvocation(ImageToImageInvocation):
         )
         source_node_id = graph_execution_state.prepared_source_mapping[self.id]
 
+        print(
+            f">> INIT INFO: {self.image.image_name} {self.image.image_type}"
+        )
+
+        print(
+            f">> MASK INFO: {self.mask.image_name} {self.mask.image_type}"
+        )
+
         outputs = Inpaint(model).generate(
             prompt=self.prompt,
-            init_img=image,
-            init_mask=mask,
-            step_callback=partial(self.dispatch_progress, context, source_node_id),
+            init_image=image,
+            mask_image=mask,
+            step_callback=partial(self.dispatch_progress,
+                                  context, source_node_id),
             **self.dict(
                 exclude={"prompt", "image", "mask"}
             ),  # Shorthand for passing all of the parameters above manually
@@ -273,7 +280,8 @@ class InpaintInvocation(ImageToImageInvocation):
             session_id=context.graph_execution_state_id, node=self
         )
 
-        context.services.images.save(image_type, image_name, result_image, metadata)
+        context.services.images.save(
+            image_type, image_name, result_image, metadata)
         return build_image_output(
             image_type=image_type,
             image_name=image_name,

@@ -34,7 +34,7 @@ class Inpaint(Img2Img):
     def __init__(self, model, precision):
         self.inpaint_height = 0
         self.inpaint_width = 0
-        self.enable_image_debugging = False
+        self.enable_image_debugging = True
         self.init_latent = None
         self.pil_image = None
         self.pil_mask = None
@@ -100,7 +100,8 @@ class Inpaint(Img2Img):
 
         # Get RGB tiles in single array and filter by the mask
         tshape = tiles.shape
-        tiles_all = tiles.reshape((math.prod(tiles.shape[0:2]), *tiles.shape[2:]))
+        tiles_all = tiles.reshape(
+            (math.prod(tiles.shape[0:2]), *tiles.shape[2:]))
         filtered_tiles = tiles_all[tiles_mask]
 
         if len(filtered_tiles) == 0:
@@ -260,14 +261,16 @@ class Inpaint(Img2Img):
 
             # Resize if requested for inpainting
             if inpaint_width and inpaint_height:
-                init_filled = init_filled.resize((inpaint_width, inpaint_height))
+                init_filled = init_filled.resize(
+                    (inpaint_width, inpaint_height))
 
             debug_image(
                 init_filled, "init_filled", debug_status=self.enable_image_debugging
             )
 
             # Create init tensor
-            init_image = image_resized_to_grid_as_tensor(init_filled.convert("RGB"))
+            init_image = image_resized_to_grid_as_tensor(
+                init_filled.convert("RGB"))
 
         if isinstance(mask_image, PIL.Image.Image):
             self.pil_mask = mask_image.copy()
@@ -277,11 +280,23 @@ class Inpaint(Img2Img):
                 debug_status=self.enable_image_debugging,
             )
 
+            # Converts from black and white to RGBA
+            # https://stackoverflow.com/questions/765736/how-to-use-pil-to-make-all-white-pixels-transparent
+            '''
+            x = np.asarray(self.pil_image.convert('RGBA')).copy()
+
+            x[:, :, 3] = (255 * (x[:, :, :3] != 255).any(axis=2)
+                          ).astype(np.uint8)
+
+            self.pil_image = Image.fromarray(x)
+            '''
+            self.pil_image = self.pil_image.convert("RGBA")
             init_alpha = self.pil_image.getchannel("A")
             if mask_image.mode != "L":
                 # FIXME: why do we get passed an RGB image here? We can only use single-channel.
                 mask_image = mask_image.convert("L")
             mask_image = ImageChops.multiply(mask_image, init_alpha)
+
             self.pil_mask = mask_image
 
             # Resize if requested for inpainting
@@ -390,7 +405,8 @@ class Inpaint(Img2Img):
         return self.postprocess_size_and_mask(gen_result)
 
     def postprocess_size_and_mask(self, gen_result: Image.Image) -> Image.Image:
-        debug_image(gen_result, "gen_result", debug_status=self.enable_image_debugging)
+        debug_image(gen_result, "gen_result",
+                    debug_status=self.enable_image_debugging)
 
         # Resize if necessary
         if self.inpaint_width and self.inpaint_height:
