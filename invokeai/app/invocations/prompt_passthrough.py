@@ -9,7 +9,9 @@ class PromptPassthroughInvocation(BaseInvocation):
     #fmt: off
     type: Literal["prompt_passthrough"] = "prompt_passthrough"
     prompt: str = Field(default=None, description="The input prompt")
+    prompt2: str = Field(default=None, description="The input prompt2")
+
     #fmt: on
 
     def invoke(self, context: InvocationContext) -> PromptOutput:
-        return PromptOutput(prompt=self.prompt)
+        return PromptOutput(prompt=self.prompt +self.prompt2)
