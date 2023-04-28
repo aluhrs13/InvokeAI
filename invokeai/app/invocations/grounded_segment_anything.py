@@ -51,7 +51,7 @@ class GroundedSegmentAnythingInvocation(BaseInvocation):
     tag2text_checkpoint: str = Field(default="E:\\StableDiffusion\\Tag2Text\\tag2text_swin_14m.pth", description="path to checkpoint file")
     grounded_checkpoint: str = Field(default="E:\\StableDiffusion\\GroundingDINO\\groundingdino_swint_ogc.pth", description="path to checkpoint filet")
     sam_checkpoint: str = Field(default="E:\\StableDiffusion\\SegmentAnything\\sam_vit_h_4b8939.pth", description="path to checkpoint file")
-    image_path: str = Field(default="E:\\StableDiffusion\\cats.png", description="path to image file")
+    image: ImageField = Field(default=None, description="The image to run inference on.")
     split: str = Field(default=",", description="split for text prompt")
     output_dir: str = Field(default="E:\\StableDiffusion", description="output directory")
     box_threshold: float = Field(default=0.25, description="box threshold")
@@ -207,7 +207,21 @@ class GroundedSegmentAnythingInvocation(BaseInvocation):
         # make dir
         os.makedirs(self.output_dir, exist_ok=True)
         # load image
-        image_pil, image = self.load_image(self.image_path)
+        initial_image = context.services.images.get(
+            self.image.image_type, self.image.image_name
+        )
+
+        image_pil = initial_image.copy()
+        
+        transform = T.Compose(
+            [
+                T.RandomResize([800], max_size=1333),
+                T.ToTensor(),
+                T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
+        image, _ = transform(image_pil, None)
+
         # load model
         model = self.load_model(self.config_file, self.grounded_checkpoint, cpu_only=self.cpu_only)
 
@@ -239,8 +253,8 @@ class GroundedSegmentAnythingInvocation(BaseInvocation):
 
         # initialize SAM
         predictor = SamPredictor(build_sam(checkpoint=self.sam_checkpoint).to(device))
-        image = cv2.imread(self.image_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.cvtColor(np.array(image_pil), cv2.COLOR_BGR2RGB)
+
         predictor.set_image(image)
 
         size = image_pil.size
@@ -295,5 +309,5 @@ class GroundedSegmentAnythingInvocation(BaseInvocation):
             session_id=context.graph_execution_state_id, node=self
         )
 
-        # context.services.images.save(image_type, image_name, output_mask, metadata)
+        context.services.images.save(image_type, image_name, image_pil, metadata)
         return ImageOutput(image=ImageField(image_type=image_type, image_name=image_name))
