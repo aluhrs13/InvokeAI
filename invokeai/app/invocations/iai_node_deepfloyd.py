@@ -8,30 +8,54 @@ from diffusers.utils import pt_to_pil
 import torch
 
 from ..models.image import ImageField, ImageType
-from .latent import LatentsOutput, LatentsField
+from .latent import LatentsOutput, LatentsField, random_seed
 
 
 """
 TODO:
 - Can each node take in noise, or does that need be a generator?
-- Pass the prompt_embeds between stage 1 and stage 2
 - Is stage 3 just resize latents?
 - Get seed from latent.py
-
-Bigger TODO: Can this all be done in latent.py?
 """
 
-"""
-class GeneratePromptEmbeds(BaseInvocation):
+class LatentsPairOutput(BaseInvocationOutput):
+    # fmt: off
+    type: Literal["latents_pair"] = "latents_pair"
+    latents1: LatentsField = Field(default=None, description="Latents #1")
+    latents2: LatentsField = Field(default=None, description="Latents #2")
+    # fmt: on
 
-    def invoke(self, context: InvocationContext) -> LatentOutput:
-        return LatentOutput(latent=torch.randn(1, 512, 1, 1))
-"""
+class PromptEmbedsInvocation(BaseInvocation):
+    type: Literal["prompt_embeds"] = "prompt_embeds"
+    prompt: str = Field(default=None, description="The input prompt")
+    negative_prompt: str = Field(default=None, description="The negative prompt")
+    stage_1_model: str = Field(default="DeepFloyd/IF-I-XL-v1.0", description="The stage1 model")
+    enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
+
+    def invoke(self, context: InvocationContext) -> LatentsPairOutput:
+        dtype = torch.float16
+        variant = "fp16"
+
+        stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype)
+        
+        if self.enable_cpu_offload:
+            stage_1.enable_model_cpu_offload()
+
+        prompt_embeds, negative_embeds = stage_1.encode_prompt(self.prompt)
+
+        name1 = f'{context.graph_execution_state_id}__{self.id}_prompt'
+        context.services.latents.set(name1, prompt_embeds)
+
+        name2 = f'{context.graph_execution_state_id}__{self.id}_negative_prompt'
+        context.services.latents.set(name2, negative_embeds)
+
+        return LatentsPairOutput(latents1=LatentsField(latents_name=name1), latents2=LatentsField(latents_name=name2))
+
 class DeepFloydStage1Invocation(BaseInvocation):
     #fmt: off
     type: Literal["deep_floyd_stage_1"] = "deep_floyd_stage_1"
-    prompt: str = Field(default=None, description="The input prompt")
-    negative_prompt: str = Field(default=None, description="The input prompt")
+    prompt_embeds: LatentsField = Field(default=None, description="The input prompt")
+    negative_embeds: LatentsField = Field(default=None, description="The input negative prompt")
     stage_1_model: str = Field(default="DeepFloyd/IF-I-XL-v1.0", description="The stage1 model")
     enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
     #fmt: on
@@ -39,14 +63,14 @@ class DeepFloydStage1Invocation(BaseInvocation):
     def invoke(self, context: InvocationContext) -> LatentsOutput:
         dtype = torch.float16
         variant = "fp16"
+        prompt_embeds = context.services.latents.get(self.prompt_embeds.latents_name)
+        negative_embeds = context.services.latents.get(self.negative_embeds.latents_name)
 
         # stage 1
         stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype)
         
         if self.enable_cpu_offload:
             stage_1.enable_model_cpu_offload()
-
-        prompt_embeds, negative_embeds = stage_1.encode_prompt(self.prompt)
 
         generator = torch.manual_seed(0)
         image = stage_1(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt").images
@@ -60,10 +84,9 @@ class DeepFloydStage1Invocation(BaseInvocation):
 class DeepFloydStage2Invocation(BaseInvocation):
     #fmt: off
     type: Literal["deep_floyd_stage_2"] = "deep_floyd_stage_2"
-    prompt: str = Field(default=None, description="The input prompt")
-    negative_prompt: str = Field(default=None, description="The input prompt")
+    prompt_embeds: LatentsField = Field(default=None, description="The input prompt")
+    negative_embeds: LatentsField = Field(default=None, description="The input negative prompt")
     latents: Optional[LatentsField] = Field(description="The latents to generate an image from")
-    stage_1_model: str = Field(default="DeepFloyd/IF-I-XL-v1.0", description="The stage1 model")
     stage_2_model: str = Field(default="DeepFloyd/IF-II-L-v1.0", description="The stage2 model")
     enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
     #fmt: on
@@ -72,13 +95,8 @@ class DeepFloydStage2Invocation(BaseInvocation):
         dtype = torch.float16
         variant = "fp16"
         latents = context.services.latents.get(self.latents.latents_name)
-
-        stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype)
-        
-        if self.enable_cpu_offload:
-            stage_1.enable_model_cpu_offload()
-
-        prompt_embeds, negative_embeds = stage_1.encode_prompt(self.prompt)
+        prompt_embeds = context.services.latents.get(self.prompt_embeds.latents_name)
+        negative_embeds = context.services.latents.get(self.negative_embeds.latents_name)
 
         # stage 2
         stage_2 = DiffusionPipeline.from_pretrained(self.stage_2_model, text_encoder=None, variant=variant, torch_dtype=dtype)
@@ -87,7 +105,6 @@ class DeepFloydStage2Invocation(BaseInvocation):
             stage_2.enable_model_cpu_offload()
 
         generator = torch.manual_seed(0)
-
 
         image = stage_2(
             image=latents, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt"
