@@ -4,6 +4,19 @@ from .baseinvocation import BaseInvocation, InvocationContext
 from pathlib import Path
 from .prompt import PromptOutput
 
+# TODO: Magic Prompts
+    # Magic Prompts Length
+    # Magic Prompts Creativity
+# TODO: I'm Feeling Lucky
+# TODO: Attention Grabber
+# TODO: Jinja Templates
+
+# TODO: Multiple invocations
+    # Combinatorial Mode
+    # Fixed Seed
+
+# TODO: Config
+    # Wilcards Directory
 
 from dynamicprompts.generators import RandomPromptGenerator
 from dynamicprompts.wildcards import WildcardManager
