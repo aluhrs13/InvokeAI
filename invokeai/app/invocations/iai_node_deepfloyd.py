@@ -4,32 +4,77 @@ from .baseinvocation import BaseInvocation, InvocationContext, BaseInvocationOut
 from .image import ImageOutput, build_image_output
 
 from diffusers import DiffusionPipeline
-from diffusers.utils import pt_to_pil
 import torch
 
 from ..models.image import ImageType
 from .latent import LatentsOutput, LatentsField, random_seed
 
+from invokeai.app.util.step_callback import stable_diffusion_step_callback
+from ...backend.stable_diffusion import PipelineIntermediateState
+from ...backend.util.util import image_to_dataURL
+from invokeai.app.api.models.images import ProgressImage
+from diffusers.utils import pt_to_pil
+
 """
 TODO:
-- Can each node take in noise, or does that need be a generator?
-- Figure out if stage 3 can be implemented generically and contributed to main
-- Get seed from latent.py or random number node from main
 - i2i and inpainting
-- How to do dtype and variant correctly
-- Use text encoder raw for PromptEmbeds? https://huggingface.co/blog/if has an example, but needs bitsandbytes?
+
+Scale
+- Select box for model - Literal[tuple("item1", "item2")] = Field(default="item1", description="description")
 - Add comment/readme with directions for license and pip requirements
-- Select box for model
-- Progress images?
+- CFG, and other parameters
+- num_inference_steps (fix total_steps when you do)
+- guidance_scale
+- height
+- width
+
+Perf:
+- Use text encoder raw for PromptEmbeds? https://huggingface.co/blog/if has an example, but needs bitsandbytes?
+- Figure out if stage 3 can be implemented generically and contributed to main
+
+Completeness:
 - Schema_extra stuff
-- Size input?
+- Full Metadata?
+- Safety modules?
+- How to do dtype and variant correctly
+
+- Can each node take in noise, or does that need be a generator?
+- Is PromptEmbed just compel?
 """
 
-class LatentsPairOutput(BaseInvocationOutput):
+# Partially taken from latent.py
+def dispatch_progress2(
+    self: any, context: InvocationContext, step: int, latents: torch.FloatTensor
+) -> None:
+    graph_execution_state = context.services.graph_execution_manager.get(context.graph_execution_state_id)
+    source_node_id = graph_execution_state.prepared_source_mapping[self.id]
+
+    image = pt_to_pil(latents)[0]
+
+    (width, height) = image.size
+    width *= 8
+    height *= 8
+
+    #TODO: This conversion is weird colors.
+    if image.mode in ["RGBA", "P"]:
+        image = image.convert("RGB")
+
+    dataURL = image_to_dataURL(image, image_format="JPEG")
+
+    context.services.events.emit_generator_progress(
+        graph_execution_state_id=context.graph_execution_state_id,
+        node=self.dict(),
+        source_node_id=source_node_id,
+        progress_image=ProgressImage(width=width, height=height, dataURL=dataURL),
+        step=step,
+        total_steps=50,
+    )
+
+class PromptEmbedsOutput(BaseInvocationOutput):
     # fmt: off
     type: Literal["latents_pair"] = "latents_pair"
-    latents1: LatentsField = Field(default=None, description="Latents #1")
-    latents2: LatentsField = Field(default=None, description="Latents #2")
+    prompt_embeds: LatentsField = Field(default=None, description="Latents #1")
+    negative_embeds: LatentsField = Field(default=None, description="Latents #2")
     # fmt: on
 
 class PromptEmbedsInvocation(BaseInvocation):
@@ -39,7 +84,7 @@ class PromptEmbedsInvocation(BaseInvocation):
     stage_1_model: str = Field(default="DeepFloyd/IF-I-XL-v1.0", description="The stage 1 model")
     enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
 
-    def invoke(self, context: InvocationContext) -> LatentsPairOutput:
+    def invoke(self, context: InvocationContext) -> PromptEmbedsOutput:
         dtype = torch.float16
         variant = "fp16"
 
@@ -48,8 +93,7 @@ class PromptEmbedsInvocation(BaseInvocation):
         if self.enable_cpu_offload:
             stage_1.enable_model_cpu_offload()
 
-        #TODO: Actually include negative prompt
-        prompt_embeds, negative_embeds = stage_1.encode_prompt(self.prompt)
+        prompt_embeds, negative_embeds = stage_1.encode_prompt(prompt=self.prompt, negative_prompt=self.negative_prompt)
 
         name1 = f'{context.graph_execution_state_id}__{self.id}_prompt'
         context.services.latents.set(name1, prompt_embeds)
@@ -57,7 +101,7 @@ class PromptEmbedsInvocation(BaseInvocation):
         name2 = f'{context.graph_execution_state_id}__{self.id}_negative_prompt'
         context.services.latents.set(name2, negative_embeds)
 
-        return LatentsPairOutput(latents1=LatentsField(latents_name=name1), latents2=LatentsField(latents_name=name2))
+        return PromptEmbedsOutput(prompt_embeds=LatentsField(latents_name=name1), negative_embeds=LatentsField(latents_name=name2))
 
 class DeepFloydStage1Invocation(BaseInvocation):
     #fmt: off
@@ -66,6 +110,7 @@ class DeepFloydStage1Invocation(BaseInvocation):
     negative_embeds: LatentsField = Field(default=None, description="The input negative prompt")
     stage_1_model: str = Field(default="DeepFloyd/IF-I-XL-v1.0", description="The stage1 model")
     enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
+    seed: int = Field(default=-1, description="The seed to use for generation")
     #fmt: on
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
@@ -73,15 +118,27 @@ class DeepFloydStage1Invocation(BaseInvocation):
         variant = "fp16"
         prompt_embeds = context.services.latents.get(self.prompt_embeds.latents_name)
         negative_embeds = context.services.latents.get(self.negative_embeds.latents_name)
+        seed = self.seed if self.seed != -1 else random_seed()
 
         stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype)
         
         if self.enable_cpu_offload:
             stage_1.enable_model_cpu_offload()
 
-        #TODO: Seed
-        generator = torch.manual_seed(0)
-        image = stage_1(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt").images
+        def step_callback(step: int, timestep: int, latents: torch.FloatTensor):
+            dispatch_progress2(self=self, context=context, step=step, latents=latents)
+
+        generator = torch.manual_seed(seed)
+        image = stage_1(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt", callback=step_callback).images
+
+        image_type = ImageType.RESULT
+        image_name = context.services.images.create_name(
+            context.graph_execution_state_id, self.id
+        )
+        metadata = context.services.metadata.build_metadata(
+            session_id=context.graph_execution_state_id, node=self
+        )
+        context.services.images.save(image_type, image_name, pt_to_pil(image)[0], metadata)
 
         name = f'{context.graph_execution_state_id}__{self.id}'
         context.services.latents.set(name, image)
@@ -96,6 +153,7 @@ class DeepFloydStage2Invocation(BaseInvocation):
     latents: Optional[LatentsField] = Field(description="The latents to generate an image from")
     stage_2_model: str = Field(default="DeepFloyd/IF-II-L-v1.0", description="The stage2 model")
     enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
+    seed: int = Field(default=-1, description="The seed to use for generation")
     #fmt: on
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
@@ -104,18 +162,30 @@ class DeepFloydStage2Invocation(BaseInvocation):
         latents = context.services.latents.get(self.latents.latents_name)
         prompt_embeds = context.services.latents.get(self.prompt_embeds.latents_name)
         negative_embeds = context.services.latents.get(self.negative_embeds.latents_name)
+        seed = self.seed if self.seed != -1 else random_seed()
 
         stage_2 = DiffusionPipeline.from_pretrained(self.stage_2_model, text_encoder=None, variant=variant, torch_dtype=dtype)
 
         if self.enable_cpu_offload:
             stage_2.enable_model_cpu_offload()
 
-        #TODO: Seed
-        generator = torch.manual_seed(0)
+        generator = torch.manual_seed(seed)
+
+        def step_callback(step: int, timestep: int, latents: torch.FloatTensor):
+            dispatch_progress2(self=self, context=context, step=step, latents=latents)
 
         image = stage_2(
-            image=latents, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt"
+            image=latents, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt", callback=step_callback
         ).images
+
+        image_type = ImageType.RESULT
+        image_name = context.services.images.create_name(
+            context.graph_execution_state_id, self.id
+        )
+        metadata = context.services.metadata.build_metadata(
+            session_id=context.graph_execution_state_id, node=self
+        )
+        context.services.images.save(image_type, image_name, pt_to_pil(image)[0], metadata)
 
         name = f'{context.graph_execution_state_id}__{self.id}'
         context.services.latents.set(name, image)
@@ -130,24 +200,24 @@ class DeepFloydStage3Invocation(BaseInvocation):
     stage_3_model: str = Field(default="stabilityai/stable-diffusion-x4-upscaler", description="The stage3 model")
     noise_level: int = Field(default=100, description="The noise level")
     enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
+    seed: int = Field(default=0, description="The seed to use for generation")
     #fmt: on
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
         dtype = torch.float16
         latents = context.services.latents.get(self.latents.latents_name)
 
-        # stage 3
-        # safety_modules = {"feature_extractor": stage_1.feature_extractor, "safety_checker": stage_1.safety_checker, "watermarker": stage_1.watermarker}
         stage_3 = DiffusionPipeline.from_pretrained(self.stage_3_model, torch_dtype=dtype)
 
         if self.enable_cpu_offload:
             stage_3.enable_model_cpu_offload()
 
-        #TODO: Seed
-        generator = torch.manual_seed(0)
+        generator = torch.manual_seed(self.seed)
 
-        #TODO: Negative prompt
-        image = stage_3(prompt=self.prompt, image=latents, generator=generator, noise_level=self.noise_level).images
+        def step_callback(step: int, timestep: int, latents: torch.FloatTensor):
+            dispatch_progress2(self=self, context=context, step=step, latents=latents)
+
+        image = stage_3(prompt=self.prompt, negative_prompt=self.negative_prompt, image=latents, generator=generator, noise_level=self.noise_level, callback=step_callback).images
 
 
         image_type = ImageType.RESULT
