@@ -22,9 +22,6 @@ TODO:
 Scale
 - Select box for model - Literal[tuple("item1", "item2")] = Field(default="item1", description="description")
 - Add comment/readme with directions for license and pip requirements
-- CFG, and other parameters
-- num_inference_steps (fix total_steps when you do)
-- guidance_scale
 - height
 - width
 
@@ -67,7 +64,7 @@ def dispatch_progress2(
         source_node_id=source_node_id,
         progress_image=ProgressImage(width=width, height=height, dataURL=dataURL),
         step=step,
-        total_steps=50,
+        total_steps=self.steps,
     )
 
 class PromptEmbedsOutput(BaseInvocationOutput):
@@ -88,10 +85,12 @@ class PromptEmbedsInvocation(BaseInvocation):
         dtype = torch.float16
         variant = "fp16"
 
-        stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype)
+        stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype, unet=None)
         
         if self.enable_cpu_offload:
             stage_1.enable_model_cpu_offload()
+        else:
+            stage_1.to("cuda")
 
         prompt_embeds, negative_embeds = stage_1.encode_prompt(prompt=self.prompt, negative_prompt=self.negative_prompt)
 
@@ -109,8 +108,10 @@ class DeepFloydStage1Invocation(BaseInvocation):
     prompt_embeds: LatentsField = Field(default=None, description="The input prompt")
     negative_embeds: LatentsField = Field(default=None, description="The input negative prompt")
     stage_1_model: str = Field(default="DeepFloyd/IF-I-XL-v1.0", description="The stage1 model")
-    enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
-    seed: int = Field(default=-1, description="The seed to use for generation")
+    enable_cpu_offload: bool = Field(default=False, description="Enable CPU offload")
+    seed: int = Field(default=0, description="The seed to use for generation")
+    steps:       int = Field(default=50, gt=0, description="The number of steps to use to generate the image")
+    cfg_scale: float = Field(default=7.5, gt=0, description="The Classifier-Free Guidance, higher values may result in a result closer to the prompt", )    
     #fmt: on
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
@@ -120,16 +121,18 @@ class DeepFloydStage1Invocation(BaseInvocation):
         negative_embeds = context.services.latents.get(self.negative_embeds.latents_name)
         seed = self.seed if self.seed != -1 else random_seed()
 
-        stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype)
+        stage_1 = DiffusionPipeline.from_pretrained(self.stage_1_model, variant=variant, torch_dtype=dtype, text_encoder=None)
         
         if self.enable_cpu_offload:
             stage_1.enable_model_cpu_offload()
+        else:
+            stage_1.to("cuda")
 
         def step_callback(step: int, timestep: int, latents: torch.FloatTensor):
             dispatch_progress2(self=self, context=context, step=step, latents=latents)
 
         generator = torch.manual_seed(seed)
-        image = stage_1(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt", callback=step_callback).images
+        image = stage_1(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, generator=generator, output_type="pt", callback=step_callback, num_inference_steps=self.steps, guidance_scale=self.cfg_scale).images
 
         image_type = ImageType.RESULT
         image_name = context.services.images.create_name(
@@ -150,10 +153,12 @@ class DeepFloydStage2Invocation(BaseInvocation):
     type: Literal["deep_floyd_stage_2"] = "deep_floyd_stage_2"
     prompt_embeds: LatentsField = Field(default=None, description="The input prompt")
     negative_embeds: LatentsField = Field(default=None, description="The input negative prompt")
-    latents: Optional[LatentsField] = Field(description="The latents to generate an image from")
+    latents: LatentsField = Field(default=None, description="The latents to generate an image from")
     stage_2_model: str = Field(default="DeepFloyd/IF-II-L-v1.0", description="The stage2 model")
-    enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
-    seed: int = Field(default=-1, description="The seed to use for generation")
+    enable_cpu_offload: bool = Field(default=False, description="Enable CPU offload")
+    seed: int = Field(default=0, description="The seed to use for generation")
+    steps:       int = Field(default=50, gt=0, description="The number of steps to use to generate the image")
+    cfg_scale: float = Field(default=7.5, gt=0, description="The Classifier-Free Guidance, higher values may result in a result closer to the prompt", )    
     #fmt: on
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
@@ -164,10 +169,12 @@ class DeepFloydStage2Invocation(BaseInvocation):
         negative_embeds = context.services.latents.get(self.negative_embeds.latents_name)
         seed = self.seed if self.seed != -1 else random_seed()
 
-        stage_2 = DiffusionPipeline.from_pretrained(self.stage_2_model, text_encoder=None, variant=variant, torch_dtype=dtype)
+        stage_2 = DiffusionPipeline.from_pretrained(self.stage_2_model, text_encoder=None, variant=variant, torch_dtype=dtype, num_inference_steps=self.steps, guidance_scale=self.cfg_scale)
 
         if self.enable_cpu_offload:
             stage_2.enable_model_cpu_offload()
+        else:   
+            stage_2.to("cuda")
 
         generator = torch.manual_seed(seed)
 
@@ -194,13 +201,15 @@ class DeepFloydStage2Invocation(BaseInvocation):
 class DeepFloydStage3Invocation(BaseInvocation):
     #fmt: off
     type: Literal["deep_floyd_stage_3"] = "deep_floyd_stage_3"
-    latents: Optional[LatentsField] = Field(description="The latents to generate an image from")
+    latents: LatentsField = Field(default=None, description="The latents to generate an image from")
     prompt: str = Field(default=None, description="The input prompt")
     negative_prompt: str = Field(default=None, description="The negative prompt")
-    stage_3_model: str = Field(default="stabilityai/stable-diffusion-x4-upscaler", description="The stage3 model")
+    stage_3_model: str = Field(default="stabilityai/stable-diffusion-x4-upscaler", description="The stage 3 model")
     noise_level: int = Field(default=100, description="The noise level")
-    enable_cpu_offload: bool = Field(default=True, description="Enable CPU offload")
+    enable_cpu_offload: bool = Field(default=False, description="Enable CPU offload")
     seed: int = Field(default=0, description="The seed to use for generation")
+    steps:       int = Field(default=50, gt=0, description="The number of steps to use to generate the image")
+    cfg_scale: float = Field(default=7.5, gt=0, description="The Classifier-Free Guidance, higher values may result in a result closer to the prompt", )    
     #fmt: on
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
@@ -211,13 +220,15 @@ class DeepFloydStage3Invocation(BaseInvocation):
 
         if self.enable_cpu_offload:
             stage_3.enable_model_cpu_offload()
+        else:
+            stage_3.to("cuda")
 
         generator = torch.manual_seed(self.seed)
 
         def step_callback(step: int, timestep: int, latents: torch.FloatTensor):
             dispatch_progress2(self=self, context=context, step=step, latents=latents)
 
-        image = stage_3(prompt=self.prompt, negative_prompt=self.negative_prompt, image=latents, generator=generator, noise_level=self.noise_level, callback=step_callback).images
+        image = stage_3(prompt=self.prompt, negative_prompt=self.negative_prompt, image=latents, generator=generator, noise_level=self.noise_level, callback=step_callback, num_inference_steps=self.steps, guidance_scale=self.cfg_scale).images
 
 
         image_type = ImageType.RESULT
